@@ -18,6 +18,10 @@ struct ContentView: View {
                     .foregroundColor(.white)
                     .shadow(radius: 4)
 
+                Text(viewModel.statusMessage)
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.8))
+
                 if let value = viewModel.recognizedValue {
                     Text("Latest: " + viewModel.numberFormatter.string(from: NSNumber(value: value))!)
                 } else {

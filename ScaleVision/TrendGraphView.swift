@@ -12,7 +12,10 @@ struct TrendGraphView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 12)
                         .fill(Color.black.opacity(0.35))
-                    if samples.count > 1 {
+                    if samples.isEmpty {
+                        Text("Waiting for OCR samples…")
+                            .foregroundColor(.white.opacity(0.7))
+                    } else {
                         Path { path in
                             let times = samples.map { $0.timestamp.timeIntervalSince1970 }
                             let values = samples.map { $0.value }
@@ -21,11 +24,20 @@ struct TrendGraphView: View {
                                   let maxTime = times.max(),
                                   let minValue = values.min(),
                                   let maxValue = values.max(),
-                                  maxTime > minTime,
-                                  maxValue > minValue else { return }
+                                  maxTime > minTime else {
+                                if samples.first != nil {
+                                    let x = geometry.size.width / 2
+                                    let y = geometry.size.height / 2
+                                    path.move(to: CGPoint(x: x, y: y))
+                                    path.addEllipse(in: CGRect(x: x - 3, y: y - 3, width: 6, height: 6))
+                                    path.addLine(to: CGPoint(x: x, y: y))
+                                    path.addLine(to: CGPoint(x: x + 0.01, y: y))
+                                }
+                                return
+                            }
 
                             let timeRange = maxTime - minTime
-                            let valueRange = maxValue - minValue
+                            let valueRange = max(maxValue - minValue, 0.0001)
 
                             func xPosition(for time: TimeInterval) -> CGFloat {
                                 let normalized = (time - minTime) / timeRange
@@ -47,9 +59,6 @@ struct TrendGraphView: View {
                             }
                         }
                         .stroke(Color.green, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
-                    } else {
-                        Text("Waiting for samples…")
-                            .foregroundColor(.white.opacity(0.7))
                     }
                 }
             }

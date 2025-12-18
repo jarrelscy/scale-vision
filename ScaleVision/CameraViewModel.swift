@@ -1,4 +1,5 @@
 import AVFoundation
+import ImageIO
 import SwiftUI
 import Vision
 
@@ -7,10 +8,13 @@ final class CameraViewModel: NSObject, ObservableObject {
     @Published var mean: Double = 0
     @Published var standardDeviation: Double = 0
     @Published var samples: [MeasurementSample] = []
+    @Published var statusMessage: String = "Starting camera…"
 
     let captureSession = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
     private let visionQueue = DispatchQueue(label: "camera.vision.queue")
+    private let sequenceHandler = VNSequenceRequestHandler()
+    private var isConfigured = false
 
     private lazy var recognizeTextRequest: VNRecognizeTextRequest = {
         let request = VNRecognizeTextRequest(completionHandler: handleDetectedText)
@@ -28,8 +32,12 @@ final class CameraViewModel: NSObject, ObservableObject {
 
     func startSession() {
         sessionQueue.async { [weak self] in
-            self?.configureSessionIfNeeded()
-            self?.captureSession.startRunning()
+            guard let self else { return }
+            guard self.configureSessionIfNeeded() else { return }
+            self.captureSession.startRunning()
+            DispatchQueue.main.async {
+                self.statusMessage = "Looking for numbers…"
+            }
         }
     }
 
@@ -39,8 +47,8 @@ final class CameraViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func configureSessionIfNeeded() {
-        guard captureSession.inputs.isEmpty else { return }
+    private func configureSessionIfNeeded() -> Bool {
+        guard !isConfigured else { return true }
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -50,7 +58,10 @@ final class CameraViewModel: NSObject, ObservableObject {
             AVCaptureDevice.requestAccess(for: .video) { _ in semaphore.signal() }
             semaphore.wait()
         default:
-            return
+            DispatchQueue.main.async { [weak self] in
+                self?.statusMessage = "Camera permission denied."
+            }
+            return false
         }
 
         captureSession.beginConfiguration()
@@ -60,7 +71,10 @@ final class CameraViewModel: NSObject, ObservableObject {
               let input = try? AVCaptureDeviceInput(device: device),
               captureSession.canAddInput(input) else {
             captureSession.commitConfiguration()
-            return
+            DispatchQueue.main.async { [weak self] in
+                self?.statusMessage = "Camera unavailable."
+            }
+            return false
         }
 
         captureSession.addInput(input)
@@ -71,11 +85,25 @@ final class CameraViewModel: NSObject, ObservableObject {
 
         guard captureSession.canAddOutput(videoOutput) else {
             captureSession.commitConfiguration()
-            return
+            DispatchQueue.main.async { [weak self] in
+                self?.statusMessage = "Unable to read camera frames."
+            }
+            return false
         }
 
         captureSession.addOutput(videoOutput)
+
+        if let connection = videoOutput.connection(with: .video),
+           connection.isVideoOrientationSupported {
+            connection.videoOrientation = .portrait
+        }
+
         captureSession.commitConfiguration()
+        isConfigured = true
+        DispatchQueue.main.async { [weak self] in
+            self?.statusMessage = "Camera ready."
+        }
+        return true
     }
 
     private func handleDetectedText(request: VNRequest, error: Error?) {
@@ -97,6 +125,7 @@ final class CameraViewModel: NSObject, ObservableObject {
 
         DispatchQueue.main.async { [weak self] in
             self?.updateStatistics(with: value)
+            self?.statusMessage = "Tracking live samples."
         }
     }
 
@@ -127,8 +156,8 @@ final class CameraViewModel: NSObject, ObservableObject {
 extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let requestHandler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right, options: [:])
-        try? requestHandler.perform([recognizeTextRequest])
+        let orientation = CGImagePropertyOrientation(connection.videoOrientation)
+        try? sequenceHandler.perform([recognizeTextRequest], on: pixelBuffer, orientation: orientation)
     }
 }
 
@@ -136,4 +165,21 @@ struct MeasurementSample: Identifiable {
     let id = UUID()
     let timestamp: Date
     let value: Double
+}
+
+extension CGImagePropertyOrientation {
+    init(_ orientation: AVCaptureVideoOrientation) {
+        switch orientation {
+        case .portrait:
+            self = .right
+        case .portraitUpsideDown:
+            self = .left
+        case .landscapeRight:
+            self = .down
+        case .landscapeLeft:
+            self = .up
+        @unknown default:
+            self = .right
+        }
+    }
 }
