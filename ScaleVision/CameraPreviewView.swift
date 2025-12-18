@@ -30,4 +30,18 @@ final class PreviewUIView: UIView {
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if let connection = videoPreviewLayer.connection, connection.isVideoOrientationSupported {
+            connection.videoOrientation = .landscapeRight
+            // Only set mirroring if we explicitly disable automatic adjustments
+            if connection.automaticallyAdjustsVideoMirroring {
+                connection.automaticallyAdjustsVideoMirroring = false
+            }
+            if connection.isVideoMirroringSupported {
+                connection.isVideoMirrored = false
+            }
+        }
+    }
 }

@@ -1,6 +1,7 @@
 import AVFoundation
 import ImageIO
 import SwiftUI
+import UIKit
 import Vision
 
 final class CameraViewModel: NSObject, ObservableObject {
@@ -10,6 +11,9 @@ final class CameraViewModel: NSObject, ObservableObject {
     @Published var standardDeviation: Double = 0
     @Published var samples: [MeasurementSample] = []
     @Published var statusMessage: String = "Starting camera…"
+    @Published var confidenceThreshold: VNConfidence = 1.0
+    @Published var minimumTextHeight: Float = 0.1 // normalized 0..1
+    @Published var windowDuration: TimeInterval = 5 // seconds
 
     let captureSession = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
@@ -18,12 +22,13 @@ final class CameraViewModel: NSObject, ObservableObject {
     private var isConfigured = false
     private var lastDetectionDate: Date?
     private let detectionStaleInterval: TimeInterval = 1.5
-    private let sampleWindow: TimeInterval = 5
 
     private lazy var recognizeTextRequest: VNRecognizeTextRequest = {
         let request = VNRecognizeTextRequest(completionHandler: handleDetectedText)
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
+        request.recognitionLanguages = ["en-US"]
+        request.minimumTextHeight = minimumTextHeight
         return request
     }()
 
@@ -103,7 +108,13 @@ final class CameraViewModel: NSObject, ObservableObject {
 
         if let connection = videoOutput.connection(with: .video),
            connection.isVideoOrientationSupported {
-            connection.videoOrientation = .portrait
+            connection.videoOrientation = .landscapeRight
+            if connection.isVideoMirroringSupported {
+                if connection.automaticallyAdjustsVideoMirroring {
+                    connection.automaticallyAdjustsVideoMirroring = false
+                }
+                connection.isVideoMirrored = false
+            }
         }
 
         captureSession.commitConfiguration()
@@ -121,19 +132,24 @@ final class CameraViewModel: NSObject, ObservableObject {
         let decimalPattern = "\\d+(?:\\.\\d+)?"
         let regex = try? NSRegularExpression(pattern: decimalPattern)
 
-        var bestValue: Double?
+        var bestValue: (value: Double, confidence: VNConfidence)?
 
         for observation in observations {
-            guard let candidate = observation.topCandidates(1).first else { continue }
-            let range = NSRange(location: 0, length: candidate.string.utf16.count)
-            guard let match = regex?.firstMatch(in: candidate.string, range: range),
-                  let swiftRange = Range(match.range, in: candidate.string),
-                  let value = Double(candidate.string[swiftRange]) else { continue }
-            bestValue = value
-            break
+            let candidates = observation.topCandidates(3)
+            for candidate in candidates {
+                guard candidate.confidence >= confidenceThreshold else { continue }
+                let range = NSRange(location: 0, length: candidate.string.utf16.count)
+                guard let match = regex?.firstMatch(in: candidate.string, range: range),
+                      let swiftRange = Range(match.range, in: candidate.string),
+                      let value = Double(candidate.string[swiftRange]) else { continue }
+
+                if bestValue == nil || candidate.confidence > bestValue!.confidence {
+                    bestValue = (value, candidate.confidence)
+                }
+            }
         }
 
-        guard let value = bestValue else {
+        guard let accepted = bestValue else {
             DispatchQueue.main.async { [weak self] in
                 self?.lastDetectionDate = nil
                 self?.clearCurrentReading()
@@ -146,7 +162,7 @@ final class CameraViewModel: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.lastDetectionDate = detectionTime
             self?.isReadingActive = true
-            self?.updateStatistics(with: value)
+            self?.updateStatistics(with: accepted.value)
             self?.statusMessage = "Tracking live samples."
             self?.scheduleStaleReset(at: detectionTime)
         }
@@ -156,7 +172,7 @@ final class CameraViewModel: NSObject, ObservableObject {
         recognizedValue = value
         samples.append(MeasurementSample(timestamp: Date(), value: value))
 
-        let cutoff = Date().addingTimeInterval(-sampleWindow)
+        let cutoff = Date().addingTimeInterval(-windowDuration)
         while let first = samples.first, first.timestamp < cutoff {
             samples.removeFirst()
         }
@@ -195,7 +211,13 @@ final class CameraViewModel: NSObject, ObservableObject {
 extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let orientation = CGImagePropertyOrientation(connection.videoOrientation)
+        let orientation = currentImageOrientation(for: connection)
+
+        // Update recognition request parameters just-in-time
+        recognizeTextRequest.minimumTextHeight = minimumTextHeight
+        recognizeTextRequest.recognitionLanguages = ["en-US"]
+        recognizeTextRequest.regionOfInterest = currentRegionOfInterest
+
         try? sequenceHandler.perform([recognizeTextRequest], on: pixelBuffer, orientation: orientation)
     }
 }
@@ -220,5 +242,59 @@ extension CGImagePropertyOrientation {
         @unknown default:
             self = .right
         }
+    }
+}
+
+extension CameraViewModel {
+    /// Derives the correct CGImagePropertyOrientation for Vision based on the capture connection and interface/device orientation.
+    fileprivate func currentImageOrientation(for connection: AVCaptureConnection) -> CGImagePropertyOrientation {
+        // Prefer the video orientation from the capture connection when available
+        if connection.isVideoOrientationSupported {
+            switch connection.videoOrientation {
+            case .portrait: return .right
+            case .portraitUpsideDown: return .left
+            case .landscapeRight: return .down
+            case .landscapeLeft: return .up
+            @unknown default: return .right
+            }
+        }
+        // Fallback: derive from interface orientation if possible (iOS only)
+        #if os(iOS)
+        let interfaceOrientation: UIInterfaceOrientation? = {
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+                return windowScene.interfaceOrientation
+            }
+            return nil
+        }()
+        if let io = interfaceOrientation {
+            switch io {
+            case .portrait: return .right
+            case .portraitUpsideDown: return .left
+            case .landscapeLeft: return .up
+            case .landscapeRight: return .down
+            default: break
+            }
+        }
+
+        // Fallback to device orientation as a last resort
+        let deviceOrientation = UIDevice.current.orientation
+        switch deviceOrientation {
+        case .portrait: return .right
+        case .portraitUpsideDown: return .left
+        case .landscapeLeft: return .up
+        case .landscapeRight: return .down
+        default: return .right
+        }
+        #else
+        return .right
+        #endif
+    }
+}
+
+extension CameraViewModel {
+    /// Normalized ROI in Vision’s image coordinate space (0..1)
+    var currentRegionOfInterest: CGRect {
+        // Always use center band ROI
+        return CGRect(x: 0.1, y: 0.35, width: 0.8, height: 0.3)
     }
 }
