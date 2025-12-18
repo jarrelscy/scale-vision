@@ -219,7 +219,7 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         let handler = ImageRequestHandler(pixelBuffer, orientation: orientation)
         do {
-            let observations: [RecognizedTextObservation] = try handler.perform([recognizeTextRequest])
+            let observations: [RecognizedTextObservation] = try handler.perform(recognizeTextRequest)
             handleDetectedText(observations)
         } catch {
             // Ignore frame on failure
