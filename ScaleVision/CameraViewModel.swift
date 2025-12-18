@@ -22,6 +22,11 @@ final class CameraViewModel: NSObject, ObservableObject {
     private var isConfigured = false
     private var lastDetectionDate: Date?
     private let detectionStaleInterval: TimeInterval = 1.5
+    private lazy var coreMLOCREngine: CoreMLOCREngine? = {
+        CoreMLOCREngine(modelNames: .init(detector: "PPOCRv4TextDetector",
+                                          recognizer: "PPOCRv4TextRecognizer"))
+    }()
+    private let enableCoreMLOCREngine = true
 
     private lazy var recognizeTextRequest: VNRecognizeTextRequest = {
         let request = VNRecognizeTextRequest(completionHandler: handleDetectedText)
@@ -129,9 +134,6 @@ final class CameraViewModel: NSObject, ObservableObject {
         guard error == nil,
               let observations = request.results as? [VNRecognizedTextObservation] else { return }
 
-        let decimalPattern = "^(?:0|[1-9]\\d*)\\.\\d{3}$"
-        let regex = try? NSRegularExpression(pattern: decimalPattern)
-
         var bestValue: (value: Double, confidence: VNConfidence)?
 
         for observation in observations {
@@ -141,10 +143,7 @@ final class CameraViewModel: NSObject, ObservableObject {
                 let range = NSRange(location: 0, length: candidate.string.utf16.count)
                 // Full string range used to anchor regex matching
                 
-                guard let match = regex?.firstMatch(in: candidate.string, range: range),
-                      match.range.location == 0,
-                      match.range.length == range.length,
-                      let value = Double(candidate.string) else { continue }
+                guard let value = validatedNumericValue(from: candidate.string, range: range) else { continue }
 
                 if bestValue == nil || candidate.confidence > bestValue!.confidence {
                     bestValue = (value, candidate.confidence)
@@ -169,6 +168,39 @@ final class CameraViewModel: NSObject, ObservableObject {
             self?.statusMessage = "Tracking live samples."
             self?.scheduleStaleReset(at: detectionTime)
         }
+    }
+
+    private func handleRecognizedTextCandidates(_ candidates: [String], detectionTime: Date) {
+        for candidate in candidates {
+            let range = NSRange(location: 0, length: candidate.utf16.count)
+            if let value = validatedNumericValue(from: candidate, range: range) {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.lastDetectionDate = detectionTime
+                    self.isReadingActive = true
+                    self.updateStatistics(with: value)
+                    self.statusMessage = "Tracking live samples (Core ML)."
+                    self.scheduleStaleReset(at: detectionTime)
+                }
+                return
+            }
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.lastDetectionDate = nil
+            self?.clearCurrentReading()
+        }
+    }
+
+    private func validatedNumericValue(from string: String, range: NSRange) -> Double? {
+        let decimalPattern = "^(?:0|[1-9]\\d*)\\.\\d{3}$"
+        let regex = try? NSRegularExpression(pattern: decimalPattern)
+
+        guard let match = regex?.firstMatch(in: string, range: range),
+              match.range.location == 0,
+              match.range.length == range.length,
+              let value = Double(string) else { return nil }
+        return value
     }
 
     private func updateStatistics(with value: Double) {
@@ -216,12 +248,18 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let orientation = currentImageOrientation(for: connection)
 
-        // Update recognition request parameters just-in-time
-        recognizeTextRequest.minimumTextHeight = minimumTextHeight
-        recognizeTextRequest.recognitionLanguages = ["en-US"]
-        recognizeTextRequest.regionOfInterest = currentRegionOfInterest
+        if enableCoreMLOCREngine, let engine = coreMLOCREngine, engine.isReady {
+            engine.process(pixelBuffer: pixelBuffer, orientation: orientation) { [weak self] timestamp, candidates in
+                self?.handleRecognizedTextCandidates(candidates, detectionTime: timestamp)
+            }
+        } else {
+            // Update recognition request parameters just-in-time
+            recognizeTextRequest.minimumTextHeight = minimumTextHeight
+            recognizeTextRequest.recognitionLanguages = ["en-US"]
+            recognizeTextRequest.regionOfInterest = currentRegionOfInterest
 
-        try? sequenceHandler.perform([recognizeTextRequest], on: pixelBuffer, orientation: orientation)
+            try? sequenceHandler.perform([recognizeTextRequest], on: pixelBuffer, orientation: orientation)
+        }
     }
 }
 
