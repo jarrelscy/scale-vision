@@ -118,7 +118,7 @@ final class CameraViewModel: NSObject, ObservableObject {
         guard error == nil,
               let observations = request.results as? [VNRecognizedTextObservation] else { return }
 
-        let decimalPattern = "\\d+\\.\\d+"
+        let decimalPattern = "\\d+(?:\\.\\d+)?"
         let regex = try? NSRegularExpression(pattern: decimalPattern)
 
         var bestValue: Double?

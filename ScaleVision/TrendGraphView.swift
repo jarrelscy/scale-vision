@@ -4,6 +4,12 @@ struct TrendGraphView: View {
     let samples: [MeasurementSample]
     let isPaused: Bool
     private let sampleWindow: TimeInterval = 5
+    private let tickFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = 3
+        return formatter
+    }()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -18,6 +24,7 @@ struct TrendGraphView: View {
                         Text("Waiting for OCR samples…")
                             .foregroundColor(.white.opacity(0.7))
                     } else if isPaused {
+                        gridOverlay(in: geometry)
                         graphPath(in: geometry)
                             .opacity(0.3)
                         Text("Trend paused — no OCR detected")
@@ -25,7 +32,10 @@ struct TrendGraphView: View {
                             .foregroundColor(.white)
                     } else {
                         TimelineView(.periodic(from: .now, by: 1)) { _ in
-                            graphPath(in: geometry)
+                            ZStack {
+                                gridOverlay(in: geometry)
+                                graphPath(in: geometry)
+                            }
                         }
                     }
                 }
@@ -68,50 +78,110 @@ private extension TrendGraphView {
         return samples.filter { $0.timestamp >= cutoff }
     }
 
+    struct GraphMetrics {
+        let minTime: TimeInterval
+        let maxTime: TimeInterval
+        let minValue: Double
+        let maxValue: Double
+        let ticks: [Double]
+    }
+
+    func metrics() -> GraphMetrics? {
+        let times = prunedSamples.map { $0.timestamp.timeIntervalSince1970 }
+        let values = prunedSamples.map { $0.value }
+
+        guard let minTime = times.min(),
+              let maxTime = times.max(),
+              let minValue = values.min(),
+              let maxValue = values.max(),
+              maxTime > minTime else {
+            return nil
+        }
+
+        let valueRange = max(maxValue - minValue, 0.0001)
+        let midValue = minValue + valueRange / 2
+        let ticks: [Double]
+        if valueRange < 0.0001 {
+            ticks = [minValue]
+        } else {
+            ticks = [minValue, midValue, maxValue]
+        }
+
+        return GraphMetrics(minTime: minTime, maxTime: maxTime, minValue: minValue, maxValue: maxValue, ticks: ticks)
+    }
+
     @ViewBuilder
     func graphPath(in geometry: GeometryProxy) -> some View {
         Path { path in
-            let times = prunedSamples.map { $0.timestamp.timeIntervalSince1970 }
-            let values = prunedSamples.map { $0.value }
-
-            guard let minTime = times.min(),
-                  let maxTime = times.max(),
-                  let minValue = values.min(),
-                  let maxValue = values.max(),
-                  maxTime > minTime else {
-                if prunedSamples.first != nil {
-                    let x = geometry.size.width / 2
-                    let y = geometry.size.height / 2
-                    path.move(to: CGPoint(x: x, y: y))
-                    path.addEllipse(in: CGRect(x: x - 3, y: y - 3, width: 6, height: 6))
-                    path.addLine(to: CGPoint(x: x, y: y))
-                    path.addLine(to: CGPoint(x: x + 0.01, y: y))
-                }
-                return
-            }
-
-            let timeRange = maxTime - minTime
-            let valueRange = max(maxValue - minValue, 0.0001)
-
-            func xPosition(for time: TimeInterval) -> CGFloat {
-                let normalized = (time - minTime) / timeRange
-                return CGFloat(normalized) * geometry.size.width
-            }
-
-            func yPosition(for value: Double) -> CGFloat {
-                let normalized = (value - minValue) / valueRange
-                return geometry.size.height - CGFloat(normalized) * geometry.size.height
-            }
+            guard let metrics = metrics() else { return }
+            let positions = positionFunctions(for: metrics, in: geometry.size)
 
             let first = prunedSamples.first!
-            path.move(to: CGPoint(x: xPosition(for: first.timestamp.timeIntervalSince1970),
-                                  y: yPosition(for: first.value)))
+            path.move(to: CGPoint(x: positions.x(first.timestamp.timeIntervalSince1970),
+                                  y: positions.y(first.value)))
 
             for sample in prunedSamples.dropFirst() {
-                path.addLine(to: CGPoint(x: xPosition(for: sample.timestamp.timeIntervalSince1970),
-                                         y: yPosition(for: sample.value)))
+                path.addLine(to: CGPoint(x: positions.x(sample.timestamp.timeIntervalSince1970),
+                                         y: positions.y(sample.value)))
             }
         }
         .stroke(Color.green, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+    }
+
+    @ViewBuilder
+    func gridOverlay(in geometry: GeometryProxy) -> some View {
+        if let metrics = metrics() {
+            let positions = positionFunctions(for: metrics, in: geometry.size)
+            ZStack(alignment: .leading) {
+                ForEach(metrics.ticks, id: \.self) { tick in
+                    let y = positions.y(tick)
+                    Path { path in
+                        path.move(to: CGPoint(x: 0, y: y))
+                        path.addLine(to: CGPoint(x: geometry.size.width, y: y))
+                    }
+                    .stroke(Color.white.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+
+                    Text(tickFormatter.string(from: NSNumber(value: tick)) ?? "")
+                        .font(.caption2)
+                        .foregroundColor(.white.opacity(0.8))
+                        .position(x: 32, y: y - 8)
+                }
+
+                HStack {
+                    Text(timeLabel(for: metrics.minTime, relativeTo: metrics.maxTime))
+                        .font(.caption2)
+                        .foregroundColor(.white.opacity(0.8))
+                    Spacer()
+                    Text("now")
+                        .font(.caption2)
+                        .foregroundColor(.white.opacity(0.8))
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 4)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+            }
+        }
+    }
+
+    func positionFunctions(for metrics: GraphMetrics, in size: CGSize) -> (x: (TimeInterval) -> CGFloat, y: (Double) -> CGFloat) {
+        let timeRange = metrics.maxTime - metrics.minTime
+        let valueRange = max(metrics.maxValue - metrics.minValue, 0.0001)
+
+        func xPosition(for time: TimeInterval) -> CGFloat {
+            let normalized = (time - metrics.minTime) / timeRange
+            return CGFloat(normalized) * size.width
+        }
+
+        func yPosition(for value: Double) -> CGFloat {
+            let normalized = (value - metrics.minValue) / valueRange
+            return size.height - CGFloat(normalized) * size.height
+        }
+
+        return (xPosition, yPosition)
+    }
+
+    func timeLabel(for minTime: TimeInterval, relativeTo maxTime: TimeInterval) -> String {
+        let delta = maxTime - minTime
+        return String(format: "-%0.1fs", delta)
     }
 }
