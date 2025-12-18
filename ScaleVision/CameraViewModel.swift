@@ -5,6 +5,7 @@ import Vision
 
 final class CameraViewModel: NSObject, ObservableObject {
     @Published var recognizedValue: Double?
+    @Published var recognizedBoundingBox: CGRect?
     @Published var mean: Double = 0
     @Published var standardDeviation: Double = 0
     @Published var samples: [MeasurementSample] = []
@@ -44,6 +45,10 @@ final class CameraViewModel: NSObject, ObservableObject {
     func stopSession() {
         sessionQueue.async { [weak self] in
             self?.captureSession.stopRunning()
+            DispatchQueue.main.async {
+                self?.recognizedBoundingBox = nil
+                self?.statusMessage = "Camera stopped."
+            }
         }
     }
 
@@ -113,18 +118,25 @@ final class CameraViewModel: NSObject, ObservableObject {
         let decimalPattern = "\\d+\\.\\d+"
         let regex = try? NSRegularExpression(pattern: decimalPattern)
 
-        let bestCandidate = observations.compactMap { observation -> Double? in
-            guard let candidate = observation.topCandidates(1).first else { return nil }
+        var bestValue: Double?
+        var bestBox: CGRect?
+
+        for observation in observations {
+            guard let candidate = observation.topCandidates(1).first else { continue }
             let range = NSRange(location: 0, length: candidate.string.utf16.count)
             guard let match = regex?.firstMatch(in: candidate.string, range: range),
-                  let swiftRange = Range(match.range, in: candidate.string) else { return nil }
-            return Double(candidate.string[swiftRange])
-        }.first
+                  let swiftRange = Range(match.range, in: candidate.string),
+                  let value = Double(candidate.string[swiftRange]) else { continue }
+            bestValue = value
+            bestBox = observation.boundingBox
+            break
+        }
 
-        guard let value = bestCandidate else { return }
+        guard let value = bestValue else { return }
 
         DispatchQueue.main.async { [weak self] in
             self?.updateStatistics(with: value)
+            self?.recognizedBoundingBox = bestBox
             self?.statusMessage = "Tracking live samples."
         }
     }
