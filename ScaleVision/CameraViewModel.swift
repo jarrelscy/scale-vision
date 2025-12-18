@@ -22,14 +22,14 @@ final class CameraViewModel: NSObject, ObservableObject {
     private var lastDetectionDate: Date?
     private let detectionStaleInterval: TimeInterval = 1.5
 
-    private lazy var recognizeTextRequest: RecognizeTextRequest = {
+    private func makeRecognizeTextRequest() -> RecognizeTextRequest {
         var request = RecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
         request.recognitionLanguages = [Locale.Language(identifier: "en-US")]
-        request.regionOfInterest = NormalizedRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
+        request.regionOfInterest = NormalizedRect(currentRegionOfInterest)
         return request
-    }()
+    }
 
     let numberFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
@@ -213,14 +213,13 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let orientation = currentImageOrientation(for: connection)
 
-        // Update recognition request parameters just-in-time
-        recognizeTextRequest.recognitionLanguages = [Locale.Language(identifier: "en-US")]
-        recognizeTextRequest.regionOfInterest = NormalizedRect(currentRegionOfInterest)
+        // Build a fresh request each frame to avoid concurrent reuse issues
+        let request = makeRecognizeTextRequest()
 
         let handler = ImageRequestHandler(pixelBuffer, orientation: orientation)
         Task(priority: .userInitiated) {
             do {
-                let observations: [RecognizedTextObservation] = try await handler.perform(recognizeTextRequest)
+                let observations: [RecognizedTextObservation] = try await handler.perform(request)
                 handleDetectedText(observations)
             } catch {
                 // Ignore frame on failure
