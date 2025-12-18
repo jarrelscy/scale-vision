@@ -5,8 +5,6 @@ import Vision
 
 final class CameraViewModel: NSObject, ObservableObject {
     @Published var recognizedValue: Double?
-    @Published var recognizedBoundingBox: CGRect?
-    @Published var videoDimensions: CGSize = .zero
     @Published var isReadingActive: Bool = false
     @Published var mean: Double = 0
     @Published var standardDeviation: Double = 0
@@ -20,6 +18,7 @@ final class CameraViewModel: NSObject, ObservableObject {
     private var isConfigured = false
     private var lastDetectionDate: Date?
     private let detectionStaleInterval: TimeInterval = 1.5
+    private let sampleWindow: TimeInterval = 5
 
     private lazy var recognizeTextRequest: VNRecognizeTextRequest = {
         let request = VNRecognizeTextRequest(completionHandler: handleDetectedText)
@@ -123,7 +122,6 @@ final class CameraViewModel: NSObject, ObservableObject {
         let regex = try? NSRegularExpression(pattern: decimalPattern)
 
         var bestValue: Double?
-        var bestBox: CGRect?
 
         for observation in observations {
             guard let candidate = observation.topCandidates(1).first else { continue }
@@ -132,7 +130,6 @@ final class CameraViewModel: NSObject, ObservableObject {
                   let swiftRange = Range(match.range, in: candidate.string),
                   let value = Double(candidate.string[swiftRange]) else { continue }
             bestValue = value
-            bestBox = observation.boundingBox
             break
         }
 
@@ -150,7 +147,6 @@ final class CameraViewModel: NSObject, ObservableObject {
             self?.lastDetectionDate = detectionTime
             self?.isReadingActive = true
             self?.updateStatistics(with: value)
-            self?.recognizedBoundingBox = bestBox
             self?.statusMessage = "Tracking live samples."
             self?.scheduleStaleReset(at: detectionTime)
         }
@@ -160,8 +156,9 @@ final class CameraViewModel: NSObject, ObservableObject {
         recognizedValue = value
         samples.append(MeasurementSample(timestamp: Date(), value: value))
 
-        if samples.count > 300 {
-            samples.removeFirst(samples.count - 300)
+        let cutoff = Date().addingTimeInterval(-sampleWindow)
+        while let first = samples.first, first.timestamp < cutoff {
+            samples.removeFirst()
         }
 
         let values = samples.map { $0.value }
@@ -188,7 +185,6 @@ final class CameraViewModel: NSObject, ObservableObject {
     }
 
     private func clearCurrentReading() {
-        recognizedBoundingBox = nil
         recognizedValue = nil
         isReadingActive = false
         lastDetectionDate = nil
@@ -200,16 +196,6 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let orientation = CGImagePropertyOrientation(connection.videoOrientation)
-        let width = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
-        let height = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
-        let pixelSize = CGSize(width: width, height: height)
-
-        DispatchQueue.main.async { [weak self] in
-            if self?.videoDimensions != pixelSize {
-                self?.videoDimensions = pixelSize
-            }
-        }
-
         try? sequenceHandler.perform([recognizeTextRequest], on: pixelBuffer, orientation: orientation)
     }
 }

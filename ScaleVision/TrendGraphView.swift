@@ -3,6 +3,7 @@ import SwiftUI
 struct TrendGraphView: View {
     let samples: [MeasurementSample]
     let isPaused: Bool
+    private let sampleWindow: TimeInterval = 5
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -13,7 +14,7 @@ struct TrendGraphView: View {
                 ZStack {
                     RoundedRectangle(cornerRadius: 12)
                         .fill(Color.black.opacity(0.35))
-                    if samples.isEmpty {
+                    if prunedSamples.isEmpty {
                         Text("Waiting for OCR samples…")
                             .foregroundColor(.white.opacity(0.7))
                     } else if isPaused {
@@ -62,18 +63,23 @@ struct TrendGraphView_Previews: PreviewProvider {
 }
 
 private extension TrendGraphView {
+    var prunedSamples: [MeasurementSample] {
+        let cutoff = Date().addingTimeInterval(-sampleWindow)
+        return samples.filter { $0.timestamp >= cutoff }
+    }
+
     @ViewBuilder
     func graphPath(in geometry: GeometryProxy) -> some View {
         Path { path in
-            let times = samples.map { $0.timestamp.timeIntervalSince1970 }
-            let values = samples.map { $0.value }
+            let times = prunedSamples.map { $0.timestamp.timeIntervalSince1970 }
+            let values = prunedSamples.map { $0.value }
 
             guard let minTime = times.min(),
                   let maxTime = times.max(),
                   let minValue = values.min(),
                   let maxValue = values.max(),
                   maxTime > minTime else {
-                if samples.first != nil {
+                if prunedSamples.first != nil {
                     let x = geometry.size.width / 2
                     let y = geometry.size.height / 2
                     path.move(to: CGPoint(x: x, y: y))
@@ -97,11 +103,11 @@ private extension TrendGraphView {
                 return geometry.size.height - CGFloat(normalized) * geometry.size.height
             }
 
-            let first = samples.first!
+            let first = prunedSamples.first!
             path.move(to: CGPoint(x: xPosition(for: first.timestamp.timeIntervalSince1970),
                                   y: yPosition(for: first.value)))
 
-            for sample in samples.dropFirst() {
+            for sample in prunedSamples.dropFirst() {
                 path.addLine(to: CGPoint(x: xPosition(for: sample.timestamp.timeIntervalSince1970),
                                          y: yPosition(for: sample.value)))
             }
