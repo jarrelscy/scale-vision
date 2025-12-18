@@ -129,7 +129,7 @@ final class CameraViewModel: NSObject, ObservableObject {
         guard error == nil,
               let observations = request.results as? [VNRecognizedTextObservation] else { return }
 
-        let decimalPattern = "\\d+(?:\\.\\d+)?"
+        let decimalPattern = "^(?:0|[1-9]\\d*)\\.\\d{3}$"
         let regex = try? NSRegularExpression(pattern: decimalPattern)
 
         var bestValue: (value: Double, confidence: VNConfidence)?
@@ -139,9 +139,12 @@ final class CameraViewModel: NSObject, ObservableObject {
             for candidate in candidates {
                 guard candidate.confidence >= confidenceThreshold else { continue }
                 let range = NSRange(location: 0, length: candidate.string.utf16.count)
+                // Full string range used to anchor regex matching
+                
                 guard let match = regex?.firstMatch(in: candidate.string, range: range),
-                      let swiftRange = Range(match.range, in: candidate.string),
-                      let value = Double(candidate.string[swiftRange]) else { continue }
+                      match.range.location == 0,
+                      match.range.length == range.length,
+                      let value = Double(candidate.string) else { continue }
 
                 if bestValue == nil || candidate.confidence > bestValue!.confidence {
                     bestValue = (value, candidate.confidence)
