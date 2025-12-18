@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import Vision
 
 struct ContentView: View {
     @StateObject private var viewModel = CameraViewModel()
@@ -74,26 +75,19 @@ struct ContentView_Previews: PreviewProvider {
 private func boundingBoxRect(_ normalizedBox: CGRect, in viewSize: CGSize, videoSize: CGSize) -> CGRect? {
     guard videoSize.width > 0, videoSize.height > 0 else { return nil }
 
-    let viewAspect = viewSize.width / viewSize.height
-    let videoAspect = videoSize.width / videoSize.height
+    let imageRect = VNImageRectForNormalizedRect(normalizedBox, Int(videoSize.width), Int(videoSize.height))
 
-    if viewAspect > videoAspect {
-        let scaledHeight = viewSize.width / videoAspect
-        let yOffset = (scaledHeight - viewSize.height) / 2
-        return CGRect(
-            x: normalizedBox.minX * viewSize.width,
-            y: (1 - normalizedBox.maxY) * scaledHeight - yOffset,
-            width: normalizedBox.width * viewSize.width,
-            height: normalizedBox.height * scaledHeight
-        )
-    } else {
-        let scaledWidth = viewSize.height * videoAspect
-        let xOffset = (scaledWidth - viewSize.width) / 2
-        return CGRect(
-            x: normalizedBox.minX * scaledWidth - xOffset,
-            y: (1 - normalizedBox.maxY) * viewSize.height,
-            width: normalizedBox.width * scaledWidth,
-            height: normalizedBox.height * viewSize.height
-        )
-    }
+    let scale = max(viewSize.width / videoSize.width, viewSize.height / videoSize.height)
+    let scaledVideoSize = CGSize(width: videoSize.width * scale, height: videoSize.height * scale)
+    let xOffset = (scaledVideoSize.width - viewSize.width) / 2
+    let yOffset = (scaledVideoSize.height - viewSize.height) / 2
+
+    let originX = imageRect.minX * scale - xOffset
+    let originY = (scaledVideoSize.height - (imageRect.maxY * scale)) - yOffset
+    let width = imageRect.width * scale
+    let height = imageRect.height * scale
+
+    guard width > 0, height > 0 else { return nil }
+
+    return CGRect(x: originX, y: originY, width: width, height: height)
 }
