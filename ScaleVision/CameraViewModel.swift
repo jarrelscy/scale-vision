@@ -18,17 +18,16 @@ final class CameraViewModel: NSObject, ObservableObject {
     let captureSession = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
     private let visionQueue = DispatchQueue(label: "camera.vision.queue")
-    private let sequenceHandler = VNSequenceRequestHandler()
     private var isConfigured = false
     private var lastDetectionDate: Date?
     private let detectionStaleInterval: TimeInterval = 1.5
 
-    private lazy var recognizeTextRequest: VNRecognizeTextRequest = {
-        let request = VNRecognizeTextRequest(completionHandler: handleDetectedText)
+    private lazy var recognizeTextRequest: RecognizeTextRequest = {
+        var request = RecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
-        request.recognitionLanguages = ["en-US"]
-        request.minimumTextHeight = minimumTextHeight
+        request.recognitionLanguages = [Locale.Language(identifier: "en-US")]
+        request.regionOfInterest = NormalizedRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
         return request
     }()
 
@@ -125,10 +124,8 @@ final class CameraViewModel: NSObject, ObservableObject {
         return true
     }
 
-    private func handleDetectedText(request: VNRequest, error: Error?) {
-        guard error == nil,
-              let observations = request.results as? [VNRecognizedTextObservation] else { return }
-
+    private func handleDetectedText(_ observations: [RecognizedTextObservation]) {
+        
         let decimalPattern = "^(?:0|[1-9]\\d*)\\.\\d{3}$"
         let regex = try? NSRegularExpression(pattern: decimalPattern)
 
@@ -217,11 +214,18 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         let orientation = currentImageOrientation(for: connection)
 
         // Update recognition request parameters just-in-time
-        recognizeTextRequest.minimumTextHeight = minimumTextHeight
-        recognizeTextRequest.recognitionLanguages = ["en-US"]
-        recognizeTextRequest.regionOfInterest = currentRegionOfInterest
+        recognizeTextRequest.recognitionLanguages = [Locale.Language(identifier: "en-US")]
+        recognizeTextRequest.regionOfInterest = NormalizedRect(currentRegionOfInterest)
 
-        try? sequenceHandler.perform([recognizeTextRequest], on: pixelBuffer, orientation: orientation)
+        let handler = ImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation)
+        do {
+            try handler.perform([recognizeTextRequest])
+            let observations = recognizeTextRequest.results ?? []
+            handleDetectedText(observations)
+        } catch {
+            // Ignore frame on failure
+            return
+        }
     }
 }
 
@@ -299,5 +303,11 @@ extension CameraViewModel {
     var currentRegionOfInterest: CGRect {
         // Use a centered square-ish region to cover more of the frame
         return CGRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
+    }
+}
+
+extension NormalizedRect {
+    init(_ rect: CGRect) {
+        self.init(x: rect.origin.x, y: rect.origin.y, width: rect.width, height: rect.height)
     }
 }
