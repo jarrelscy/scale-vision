@@ -297,7 +297,7 @@ extension CameraViewModel {
 extension CameraViewModel {
     /// Normalized ROI in Vision’s image coordinate space (0..1)
     var currentRegionOfInterest: CGRect {
-        // Always use center band ROI
-        return CGRect(x: 0.1, y: 0.35, width: 0.8, height: 0.3)
+        // Use a centered square-ish region to cover more of the frame
+        return CGRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
     }
 }
