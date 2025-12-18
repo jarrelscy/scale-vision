@@ -202,18 +202,11 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         let orientation = CGImagePropertyOrientation(connection.videoOrientation)
         let width = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
         let height = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
-        let orientedSize: CGSize
-
-        switch connection.videoOrientation {
-        case .portrait, .portraitUpsideDown:
-            orientedSize = CGSize(width: height, height: width)
-        default:
-            orientedSize = CGSize(width: width, height: height)
-        }
+        let pixelSize = CGSize(width: width, height: height)
 
         DispatchQueue.main.async { [weak self] in
-            if self?.videoDimensions != orientedSize {
-                self?.videoDimensions = orientedSize
+            if self?.videoDimensions != pixelSize {
+                self?.videoDimensions = pixelSize
             }
         }
 
