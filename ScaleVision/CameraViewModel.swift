@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreImage
 import ImageIO
 import SwiftUI
 import UIKit
@@ -18,19 +19,14 @@ final class CameraViewModel: NSObject, ObservableObject {
     let captureSession = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
     private let visionQueue = DispatchQueue(label: "camera.vision.queue")
-    private let sequenceHandler = VNSequenceRequestHandler()
+    private let ciContext = CIContext()
     private var isConfigured = false
     private var lastDetectionDate: Date?
     private let detectionStaleInterval: TimeInterval = 1.5
-
-    private lazy var recognizeTextRequest: VNRecognizeTextRequest = {
-        let request = VNRecognizeTextRequest(completionHandler: handleDetectedText)
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = false
-        request.recognitionLanguages = ["en-US"]
-        request.minimumTextHeight = minimumTextHeight
-        return request
-    }()
+    private let ocrClient = PaddleOCRClient()
+    private let ocrThrottleInterval: TimeInterval = 0.6
+    private var lastOCRRequestDate: Date?
+    private var ocrInFlight = false
 
     let numberFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
@@ -45,7 +41,7 @@ final class CameraViewModel: NSObject, ObservableObject {
             guard self.configureSessionIfNeeded() else { return }
             self.captureSession.startRunning()
             DispatchQueue.main.async {
-                self.statusMessage = "Looking for numbers…"
+                self.statusMessage = "Looking for numbers with PaddleOCR…"
             }
         }
     }
@@ -125,52 +121,6 @@ final class CameraViewModel: NSObject, ObservableObject {
         return true
     }
 
-    private func handleDetectedText(request: VNRequest, error: Error?) {
-        guard error == nil,
-              let observations = request.results as? [VNRecognizedTextObservation] else { return }
-
-        let decimalPattern = "^(?:0|[1-9]\\d*)\\.\\d{3}$"
-        let regex = try? NSRegularExpression(pattern: decimalPattern)
-
-        var bestValue: (value: Double, confidence: VNConfidence)?
-
-        for observation in observations {
-            let candidates = observation.topCandidates(3)
-            for candidate in candidates {
-                guard candidate.confidence >= confidenceThreshold else { continue }
-                let range = NSRange(location: 0, length: candidate.string.utf16.count)
-                // Full string range used to anchor regex matching
-                
-                guard let match = regex?.firstMatch(in: candidate.string, range: range),
-                      match.range.location == 0,
-                      match.range.length == range.length,
-                      let value = Double(candidate.string) else { continue }
-
-                if bestValue == nil || candidate.confidence > bestValue!.confidence {
-                    bestValue = (value, candidate.confidence)
-                }
-            }
-        }
-
-        guard let accepted = bestValue else {
-            DispatchQueue.main.async { [weak self] in
-                self?.lastDetectionDate = nil
-                self?.clearCurrentReading()
-            }
-            return
-        }
-
-        let detectionTime = Date()
-
-        DispatchQueue.main.async { [weak self] in
-            self?.lastDetectionDate = detectionTime
-            self?.isReadingActive = true
-            self?.updateStatistics(with: accepted.value)
-            self?.statusMessage = "Tracking live samples."
-            self?.scheduleStaleReset(at: detectionTime)
-        }
-    }
-
     private func updateStatistics(with value: Double) {
         recognizedValue = value
         samples.append(MeasurementSample(timestamp: Date(), value: value))
@@ -207,7 +157,79 @@ final class CameraViewModel: NSObject, ObservableObject {
         recognizedValue = nil
         isReadingActive = false
         lastDetectionDate = nil
-        statusMessage = "Looking for numbers…"
+        statusMessage = "Looking for numbers with PaddleOCR…"
+    }
+
+    private func shouldIssueOCRRequest() -> Bool {
+        if ocrInFlight { return false }
+        if let last = lastOCRRequestDate, Date().timeIntervalSince(last) < ocrThrottleInterval {
+            return false
+        }
+        return true
+    }
+
+    private func makeCGImage(from pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) -> CGImage? {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(orientation)
+        return ciContext.createCGImage(ciImage, from: ciImage.extent)
+    }
+
+    private func crop(image: CGImage, to normalizedRect: CGRect) -> CGImage? {
+        let width = CGFloat(image.width)
+        let height = CGFloat(image.height)
+
+        // Vision normalized coordinates originate in the lower-left; CGImage uses upper-left
+        let adjustedRect = CGRect(
+            x: normalizedRect.origin.x * width,
+            y: (1 - normalizedRect.origin.y - normalizedRect.height) * height,
+            width: normalizedRect.width * width,
+            height: normalizedRect.height * height
+        ).integral
+
+        let boundedRect = adjustedRect.intersection(CGRect(x: 0, y: 0, width: width, height: height))
+        guard !boundedRect.isNull, let cropped = image.cropping(to: boundedRect) else {
+            return nil
+        }
+        return cropped
+    }
+
+    private func handleRecognizedCandidates(_ candidates: [PaddleOCRCandidate]) {
+        let decimalPattern = "^(?:0|[1-9]\\d*)\\.\\d{3}$"
+        let regex = try? NSRegularExpression(pattern: decimalPattern)
+
+        var bestValue: (value: Double, confidence: VNConfidence)?
+
+        for candidate in candidates {
+            let confidence = VNConfidence(candidate.confidence)
+            guard confidence >= confidenceThreshold else { continue }
+
+            let range = NSRange(location: 0, length: candidate.text.utf16.count)
+            guard let match = regex?.firstMatch(in: candidate.text, range: range),
+                  match.range.location == 0,
+                  match.range.length == range.length,
+                  let value = Double(candidate.text) else { continue }
+
+            if bestValue == nil || confidence > bestValue!.confidence {
+                bestValue = (value, confidence)
+            }
+        }
+
+        guard let accepted = bestValue else {
+            DispatchQueue.main.async { [weak self] in
+                self?.lastDetectionDate = nil
+                self?.clearCurrentReading()
+            }
+            return
+        }
+
+        let detectionTime = Date()
+
+        DispatchQueue.main.async { [weak self] in
+            self?.lastDetectionDate = detectionTime
+            self?.isReadingActive = true
+            self?.updateStatistics(with: accepted.value)
+            self?.statusMessage = "Tracking live samples (PaddleOCR)."
+            self?.scheduleStaleReset(at: detectionTime)
+        }
     }
 }
 
@@ -216,12 +238,25 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let orientation = currentImageOrientation(for: connection)
 
-        // Update recognition request parameters just-in-time
-        recognizeTextRequest.minimumTextHeight = minimumTextHeight
-        recognizeTextRequest.recognitionLanguages = ["en-US"]
-        recognizeTextRequest.regionOfInterest = currentRegionOfInterest
-
-        try? sequenceHandler.perform([recognizeTextRequest], on: pixelBuffer, orientation: orientation)
+        guard shouldIssueOCRRequest() else { return }
+        guard let cgImage = makeCGImage(from: pixelBuffer, orientation: orientation) else { return }
+        let roiImage = crop(image: cgImage, to: currentRegionOfInterest) ?? cgImage
+        ocrInFlight = true
+        lastOCRRequestDate = Date()
+        ocrClient.recognizeText(in: roiImage) { [weak self] result in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.ocrInFlight = false
+            }
+            switch result {
+            case .success(let candidates):
+                self.handleRecognizedCandidates(candidates)
+            case .failure:
+                DispatchQueue.main.async {
+                    self.statusMessage = "Waiting for PaddleOCR…"
+                }
+            }
+        }
     }
 }
 
