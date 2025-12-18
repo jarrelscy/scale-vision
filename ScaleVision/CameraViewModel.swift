@@ -217,10 +217,9 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         recognizeTextRequest.recognitionLanguages = [Locale.Language(identifier: "en-US")]
         recognizeTextRequest.regionOfInterest = NormalizedRect(currentRegionOfInterest)
 
-        let handler = ImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation)
+        let handler = ImageRequestHandler(buffer: pixelBuffer, orientation: orientation)
         do {
-            try handler.perform([recognizeTextRequest])
-            let observations = recognizeTextRequest.results ?? []
+            let observations: [RecognizedTextObservation] = try handler.perform([recognizeTextRequest])
             handleDetectedText(observations)
         } catch {
             // Ignore frame on failure
