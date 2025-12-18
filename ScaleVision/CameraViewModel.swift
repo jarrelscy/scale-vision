@@ -6,6 +6,8 @@ import Vision
 final class CameraViewModel: NSObject, ObservableObject {
     @Published var recognizedValue: Double?
     @Published var recognizedBoundingBox: CGRect?
+    @Published var videoDimensions: CGSize = .zero
+    @Published var isReadingActive: Bool = false
     @Published var mean: Double = 0
     @Published var standardDeviation: Double = 0
     @Published var samples: [MeasurementSample] = []
@@ -16,6 +18,8 @@ final class CameraViewModel: NSObject, ObservableObject {
     private let visionQueue = DispatchQueue(label: "camera.vision.queue")
     private let sequenceHandler = VNSequenceRequestHandler()
     private var isConfigured = false
+    private var lastDetectionDate: Date?
+    private let detectionStaleInterval: TimeInterval = 1.5
 
     private lazy var recognizeTextRequest: VNRecognizeTextRequest = {
         let request = VNRecognizeTextRequest(completionHandler: handleDetectedText)
@@ -46,7 +50,7 @@ final class CameraViewModel: NSObject, ObservableObject {
         sessionQueue.async { [weak self] in
             self?.captureSession.stopRunning()
             DispatchQueue.main.async {
-                self?.recognizedBoundingBox = nil
+                self?.clearCurrentReading()
                 self?.statusMessage = "Camera stopped."
             }
         }
@@ -132,12 +136,23 @@ final class CameraViewModel: NSObject, ObservableObject {
             break
         }
 
-        guard let value = bestValue else { return }
+        guard let value = bestValue else {
+            DispatchQueue.main.async { [weak self] in
+                self?.lastDetectionDate = nil
+                self?.clearCurrentReading()
+            }
+            return
+        }
+
+        let detectionTime = Date()
 
         DispatchQueue.main.async { [weak self] in
+            self?.lastDetectionDate = detectionTime
+            self?.isReadingActive = true
             self?.updateStatistics(with: value)
             self?.recognizedBoundingBox = bestBox
             self?.statusMessage = "Tracking live samples."
+            self?.scheduleStaleReset(at: detectionTime)
         }
     }
 
@@ -163,12 +178,45 @@ final class CameraViewModel: NSObject, ObservableObject {
 
         standardDeviation = sqrt(variance)
     }
+
+    private func scheduleStaleReset(at detectionTime: Date) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + detectionStaleInterval) { [weak self] in
+            guard let self else { return }
+            guard self.lastDetectionDate == detectionTime else { return }
+            self.clearCurrentReading()
+        }
+    }
+
+    private func clearCurrentReading() {
+        recognizedBoundingBox = nil
+        recognizedValue = nil
+        isReadingActive = false
+        lastDetectionDate = nil
+        statusMessage = "Looking for numbers…"
+    }
 }
 
 extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let orientation = CGImagePropertyOrientation(connection.videoOrientation)
+        let width = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let height = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+        let orientedSize: CGSize
+
+        switch connection.videoOrientation {
+        case .portrait, .portraitUpsideDown:
+            orientedSize = CGSize(width: height, height: width)
+        default:
+            orientedSize = CGSize(width: width, height: height)
+        }
+
+        DispatchQueue.main.async { [weak self] in
+            if self?.videoDimensions != orientedSize {
+                self?.videoDimensions = orientedSize
+            }
+        }
+
         try? sequenceHandler.perform([recognizeTextRequest], on: pixelBuffer, orientation: orientation)
     }
 }
