@@ -23,8 +23,8 @@ final class CameraViewModel: NSObject, ObservableObject {
     private var lastDetectionDate: Date?
     private let detectionStaleInterval: TimeInterval = 1.5
 
-    private lazy var recognizeTextRequest: VNRecognizeTextRequest = {
-        let request = VNRecognizeTextRequest(completionHandler: handleDetectedText)
+    private lazy var recognizeTextRequest: RecognizeTextRequest = {
+        let request = RecognizeTextRequest(completionHandler: handleDetectedText)
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
         request.recognitionLanguages = ["en-US"]
@@ -127,7 +127,7 @@ final class CameraViewModel: NSObject, ObservableObject {
 
     private func handleDetectedText(request: VNRequest, error: Error?) {
         guard error == nil,
-              let observations = request.results as? [VNRecognizedTextObservation] else { return }
+              let observations = request.results as? [RecognizedTextObservation] else { return }
 
         let decimalPattern = "^(?:0|[1-9]\\d*)\\.\\d{3}$"
         let regex = try? NSRegularExpression(pattern: decimalPattern)
