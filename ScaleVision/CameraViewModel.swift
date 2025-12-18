@@ -218,12 +218,14 @@ extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         recognizeTextRequest.regionOfInterest = NormalizedRect(currentRegionOfInterest)
 
         let handler = ImageRequestHandler(pixelBuffer, orientation: orientation)
-        do {
-            let observations: [RecognizedTextObservation] = try handler.perform(recognizeTextRequest)
-            handleDetectedText(observations)
-        } catch {
-            // Ignore frame on failure
-            return
+        Task(priority: .userInitiated) {
+            do {
+                let observations: [RecognizedTextObservation] = try await handler.perform(recognizeTextRequest)
+                handleDetectedText(observations)
+            } catch {
+                // Ignore frame on failure
+                return
+            }
         }
     }
 }
