@@ -1,18 +1,9 @@
 import SwiftUI
-import AVFoundation
-import Vision
 
 struct ContentView: View {
     @StateObject private var viewModel = CameraViewModel()
 
     var body: some View {
-        let percentFormatter: NumberFormatter = {
-            let f = NumberFormatter()
-            f.numberStyle = .percent
-            f.maximumFractionDigits = 0
-            return f
-        }()
-
         ZStack(alignment: .topLeading) {
             CameraPreviewView(session: viewModel.captureSession)
                 .ignoresSafeArea()
@@ -22,7 +13,7 @@ struct ContentView: View {
             HStack(alignment: .top, spacing: 16) {
                 // Left control panel
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Live OCR")
+                    Text("Live VLM")
                         .font(.largeTitle)
                         .bold()
                         .foregroundColor(.white)
@@ -31,6 +22,15 @@ struct ContentView: View {
                     Text(viewModel.statusMessage)
                         .font(.subheadline)
                         .foregroundColor(.white.opacity(0.8))
+
+                    Text(viewModel.modelInfo)
+                        .font(.footnote)
+                        .foregroundColor(.white.opacity(0.8))
+
+                    Text("Prompt: \"What decimal number is shown on the LED display here? Return the number alone and nothing else.\"")
+                        .font(.footnote)
+                        .foregroundColor(.white.opacity(0.8))
+                        .padding(.top, 2)
 
                     if let value = viewModel.recognizedValue {
                         Text("Latest: " + viewModel.numberFormatter.string(from: NSNumber(value: value))!)
@@ -44,37 +44,6 @@ struct ContentView: View {
                     } else {
                         Text("Mean (paused): " + viewModel.numberFormatter.string(from: NSNumber(value: viewModel.mean))!)
                         Text("Std Dev (paused): " + viewModel.numberFormatter.string(from: NSNumber(value: viewModel.standardDeviation))!)
-                    }
-
-                    Divider().padding(.vertical, 4)
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Confidence threshold")
-                                .font(.subheadline)
-                            Spacer()
-                            Text(percentFormatter.string(from: NSNumber(value: viewModel.confidenceThreshold)) ?? "")
-                                .font(.subheadline)
-                                .monospacedDigit()
-                        }
-                        Slider(value: Binding(
-                            get: { Double(viewModel.confidenceThreshold) },
-                            set: { viewModel.confidenceThreshold = VNConfidence($0) }
-                        ), in: 0.0...1.0, step: 0.01)
-                    }
-
-                    Divider().padding(.vertical, 4)
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Min text height")
-                                .font(.subheadline)
-                            Spacer()
-                            Text(String(format: "%.2f", viewModel.minimumTextHeight))
-                                .font(.subheadline)
-                                .monospacedDigit()
-                        }
-                        Slider(value: $viewModel.minimumTextHeight, in: 0.0...0.1, step: 0.001)
                     }
 
                     Divider().padding(.vertical, 4)

@@ -1,8 +1,10 @@
 import AVFoundation
-import ImageIO
+import CoreImage
+import MLX
+import MLXLMCommon
+import MLXVLM
 import SwiftUI
 import UIKit
-import Vision
 
 final class CameraViewModel: NSObject, ObservableObject {
     @Published var recognizedValue: Double?
@@ -11,26 +13,26 @@ final class CameraViewModel: NSObject, ObservableObject {
     @Published var standardDeviation: Double = 0
     @Published var samples: [MeasurementSample] = []
     @Published var statusMessage: String = "Starting camera…"
-    @Published var confidenceThreshold: VNConfidence = 1.0
-    @Published var minimumTextHeight: Float = 0.1 // normalized 0..1
+    @Published var modelInfo: String = "Preparing smolvlm2…"
     @Published var windowDuration: TimeInterval = 5 // seconds
 
     let captureSession = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
-    private let visionQueue = DispatchQueue(label: "camera.vision.queue")
-    private let sequenceHandler = VNSequenceRequestHandler()
+    private let inferenceQueue = DispatchQueue(label: "camera.vlm.queue")
     private var isConfigured = false
     private var lastDetectionDate: Date?
-    private let detectionStaleInterval: TimeInterval = 1.5
+    private let detectionStaleInterval: TimeInterval = 3.0
 
-    private lazy var recognizeTextRequest: VNRecognizeTextRequest = {
-        let request = VNRecognizeTextRequest(completionHandler: handleDetectedText)
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = false
-        request.recognitionLanguages = ["en-US"]
-        request.minimumTextHeight = minimumTextHeight
-        return request
-    }()
+    private let inferencePrompt = "What decimal number is shown on the LED display here? Return the number alone and nothing else."
+    private let inferenceInterval: TimeInterval = 2.0
+    private var isProcessingFrame = false
+    private var lastInferenceDate: Date?
+    private var modelLoadTask: Task<ModelContainer, Error>?
+    private var generationTask: Task<Void, Never>?
+
+    private let generateParameters = MLXLMCommon.GenerateParameters(
+        maxTokens: 24, temperature: 0.0, topP: 0.9
+    )
 
     let numberFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
@@ -44,8 +46,12 @@ final class CameraViewModel: NSObject, ObservableObject {
             guard let self else { return }
             guard self.configureSessionIfNeeded() else { return }
             self.captureSession.startRunning()
+            Task { [weak self] in
+                guard let self else { return }
+                _ = try? await self.loadModelIfNeeded()
+            }
             DispatchQueue.main.async {
-                self.statusMessage = "Looking for numbers…"
+                self.statusMessage = "Model loading…"
             }
         }
     }
@@ -53,6 +59,8 @@ final class CameraViewModel: NSObject, ObservableObject {
     func stopSession() {
         sessionQueue.async { [weak self] in
             self?.captureSession.stopRunning()
+            self?.generationTask?.cancel()
+            self?.isProcessingFrame = false
             DispatchQueue.main.async {
                 self?.clearCurrentReading()
                 self?.statusMessage = "Camera stopped."
@@ -93,7 +101,7 @@ final class CameraViewModel: NSObject, ObservableObject {
         captureSession.addInput(input)
 
         let videoOutput = AVCaptureVideoDataOutput()
-        videoOutput.setSampleBufferDelegate(self, queue: visionQueue)
+        videoOutput.setSampleBufferDelegate(self, queue: inferenceQueue)
         videoOutput.alwaysDiscardsLateVideoFrames = true
 
         guard captureSession.canAddOutput(videoOutput) else {
@@ -125,50 +133,112 @@ final class CameraViewModel: NSObject, ObservableObject {
         return true
     }
 
-    private func handleDetectedText(request: VNRequest, error: Error?) {
-        guard error == nil,
-              let observations = request.results as? [VNRecognizedTextObservation] else { return }
+    private func loadModelIfNeeded() async throws -> ModelContainer {
+        if let modelLoadTask {
+            return try await modelLoadTask.value
+        }
 
-        let decimalPattern = "^(?:0|[1-9]\\d*)\\.\\d{3}$"
-        let regex = try? NSRegularExpression(pattern: decimalPattern)
+        let configuration = VLMRegistry.smolvlm2
 
-        var bestValue: (value: Double, confidence: VNConfidence)?
-
-        for observation in observations {
-            let candidates = observation.topCandidates(3)
-            for candidate in candidates {
-                guard candidate.confidence >= confidenceThreshold else { continue }
-                let range = NSRange(location: 0, length: candidate.string.utf16.count)
-                // Full string range used to anchor regex matching
-                
-                guard let match = regex?.firstMatch(in: candidate.string, range: range),
-                      match.range.location == 0,
-                      match.range.length == range.length,
-                      let value = Double(candidate.string) else { continue }
-
-                if bestValue == nil || candidate.confidence > bestValue!.confidence {
-                    bestValue = (value, candidate.confidence)
+        let task = Task { () async throws -> ModelContainer in
+            MLX.GPU.set(cacheLimit: 20 * 1024 * 1024)
+            return try await VLMModelFactory.shared.loadContainer(
+                configuration: configuration
+            ) { [weak self] progress in
+                Task { @MainActor in
+                    self?.modelInfo = "Downloading \(configuration.name): \(Int(progress.fractionCompleted * 100))%"
+                    self?.statusMessage = "Downloading smolvlm2…"
                 }
             }
         }
+        modelLoadTask = task
 
-        guard let accepted = bestValue else {
-            DispatchQueue.main.async { [weak self] in
-                self?.lastDetectionDate = nil
-                self?.clearCurrentReading()
+        do {
+            let container = try await task.value
+            let numParams = await container.perform { context in
+                context.model.numParameters()
             }
-            return
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.modelInfo = "Loaded \(configuration.id) — \(numParams / (1024 * 1024))M params"
+                if self.captureSession.isRunning {
+                    self.statusMessage = "Model ready. Looking for numbers…"
+                }
+            }
+            return container
+        } catch {
+            await MainActor.run { [weak self] in
+                self?.modelInfo = "Failed to load smolvlm2"
+                self?.statusMessage = "Model load failed."
+            }
+            modelLoadTask = nil
+            throw error
         }
+    }
 
+    private func runInference(on image: CIImage) async {
         let detectionTime = Date()
-
-        DispatchQueue.main.async { [weak self] in
-            self?.lastDetectionDate = detectionTime
-            self?.isReadingActive = true
-            self?.updateStatistics(with: accepted.value)
-            self?.statusMessage = "Tracking live samples."
-            self?.scheduleStaleReset(at: detectionTime)
+        do {
+            let value = try await recognizeValue(in: image)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.isProcessingFrame = false
+                if let value {
+                    self.lastDetectionDate = detectionTime
+                    self.isReadingActive = true
+                    self.updateStatistics(with: value)
+                    self.statusMessage = "Tracking live samples."
+                    self.scheduleStaleReset(at: detectionTime)
+                } else {
+                    self.clearCurrentReading()
+                }
+            }
+        } catch {
+            await MainActor.run { [weak self] in
+                self?.isProcessingFrame = false
+                self?.statusMessage = "Inference failed: \(error.localizedDescription)"
+            }
         }
+    }
+
+    private func recognizeValue(in ciImage: CIImage) async throws -> Double? {
+        let container = try await loadModelIfNeeded()
+        let prompt = inferencePrompt
+        let parameters = generateParameters
+
+        let response = try await container.perform { (context: ModelContext) -> String in
+            var userInput = UserInput(chat: [
+                .system("You read decimal numbers from LED displays."),
+                .user(prompt, images: [.ciImage(ciImage)])
+            ])
+            userInput.processing.resize = .init(width: 448, height: 448)
+
+            let input = try await context.processor.prepare(input: userInput)
+            let stream = try MLXLMCommon.generate(
+                input: input,
+                parameters: parameters,
+                context: context
+            )
+
+            var output = ""
+            for try await generation in stream {
+                if let chunk = generation.chunk {
+                    output += chunk
+                }
+            }
+            return output
+        }
+
+        return parseNumber(from: response)
+    }
+
+    private func parseNumber(from response: String) -> Double? {
+        let sanitized = response.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pattern = "[0-9]+\\.[0-9]+"
+        if let range = sanitized.range(of: pattern, options: .regularExpression) {
+            return Double(String(sanitized[range]))
+        }
+        return Double(sanitized)
     }
 
     private func updateStatistics(with value: Double) {
@@ -207,21 +277,29 @@ final class CameraViewModel: NSObject, ObservableObject {
         recognizedValue = nil
         isReadingActive = false
         lastDetectionDate = nil
-        statusMessage = "Looking for numbers…"
+        statusMessage = "Waiting for VLM detection…"
     }
 }
 
 extension CameraViewModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        let now = Date()
+        if isProcessingFrame || (lastInferenceDate != nil && now.timeIntervalSince(lastInferenceDate!) < inferenceInterval) {
+            return
+        }
+
+        lastInferenceDate = now
+        isProcessingFrame = true
+
         let orientation = currentImageOrientation(for: connection)
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+            .oriented(forExifOrientation: Int32(orientation.rawValue))
 
-        // Update recognition request parameters just-in-time
-        recognizeTextRequest.minimumTextHeight = minimumTextHeight
-        recognizeTextRequest.recognitionLanguages = ["en-US"]
-        recognizeTextRequest.regionOfInterest = currentRegionOfInterest
-
-        try? sequenceHandler.perform([recognizeTextRequest], on: pixelBuffer, orientation: orientation)
+        generationTask = Task(priority: .userInitiated) { [weak self] in
+            await self?.runInference(on: ciImage)
+        }
     }
 }
 
@@ -249,9 +327,7 @@ extension CGImagePropertyOrientation {
 }
 
 extension CameraViewModel {
-    /// Derives the correct CGImagePropertyOrientation for Vision based on the capture connection and interface/device orientation.
     fileprivate func currentImageOrientation(for connection: AVCaptureConnection) -> CGImagePropertyOrientation {
-        // Prefer the video orientation from the capture connection when available
         if connection.isVideoOrientationSupported {
             switch connection.videoOrientation {
             case .portrait: return .right
@@ -261,7 +337,7 @@ extension CameraViewModel {
             @unknown default: return .right
             }
         }
-        // Fallback: derive from interface orientation if possible (iOS only)
+
         #if os(iOS)
         let interfaceOrientation: UIInterfaceOrientation? = {
             if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
@@ -279,7 +355,6 @@ extension CameraViewModel {
             }
         }
 
-        // Fallback to device orientation as a last resort
         let deviceOrientation = UIDevice.current.orientation
         switch deviceOrientation {
         case .portrait: return .right
@@ -291,13 +366,5 @@ extension CameraViewModel {
         #else
         return .right
         #endif
-    }
-}
-
-extension CameraViewModel {
-    /// Normalized ROI in Vision’s image coordinate space (0..1)
-    var currentRegionOfInterest: CGRect {
-        // Always use center band ROI
-        return CGRect(x: 0.1, y: 0.35, width: 0.8, height: 0.3)
     }
 }
