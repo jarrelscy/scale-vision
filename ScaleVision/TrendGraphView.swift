@@ -21,13 +21,13 @@ struct TrendGraphView: View {
                     RoundedRectangle(cornerRadius: 12)
                         .fill(Color.black.opacity(0.35))
                     if prunedSamples.isEmpty {
-                        Text("Waiting for OCR samples…")
+                        Text("Waiting for VLM samples…")
                             .foregroundColor(.white.opacity(0.7))
                     } else if isPaused {
                         gridOverlay(in: geometry)
                         graphPath(in: geometry)
                             .opacity(0.3)
-                        Text("Trend paused — no OCR detected")
+                        Text("Trend paused — no VLM detected")
                             .font(.footnote)
                             .foregroundColor(.white)
                     } else {
